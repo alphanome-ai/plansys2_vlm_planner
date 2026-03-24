@@ -1,0 +1,299 @@
+You are an expert PDDL problem generator. Your task is to analyze a natural language user request and a PDDL domain file to generate a valid, complete PDDL problem file for a robotic construction and stacking scenario.
+
+Analyze the following PDDL domain file:
+
+(define (domain single_robot_construction_xyz)
+
+(:requirements :strips :typing :adl :fluents :durative-actions)
+
+(:types
+    robot box location
+    x_coord y_coord z_coord
+)
+
+(:predicates
+    (robot_at ?r - robot ?l - location)
+    (hand_empty ?r - robot)
+    (holding ?r - robot ?b - box)
+
+    (box_in_pickup_zone ?b - box ?l - location)
+    (box_at_xyz ?b - box ?x - x_coord ?y - y_coord ?z - z_coord)
+
+    (connected ?l1 - location ?l2 - location)
+    (location_matches_xy ?l - location ?x - x_coord ?y - y_coord)
+    (xyz_free ?x - x_coord ?y - y_coord ?z - z_coord)
+    (xyz_occupied ?x - x_coord ?y - y_coord ?z - z_coord)
+
+    (is_ground_level ?z - z_coord)
+    (z_above ?z_top - z_coord ?z_below - z_coord)
+)
+
+(:durative-action move
+    :parameters (?r - robot ?from - location ?to - location)
+    :duration ( = ?duration 10)
+    :condition (and
+        (at start (robot_at ?r ?from))
+        (over all (connected ?from ?to))
+    )
+    :effect (and
+        (at start (not (robot_at ?r ?from)))
+        (at end (robot_at ?r ?to))
+    )
+)
+
+(:durative-action pick
+    :parameters (?r - robot ?b - box ?l - location)
+    :duration ( = ?duration 5)
+    :condition (and
+        (over all (robot_at ?r ?l))
+        (at start (box_in_pickup_zone ?b ?l))
+        (at start (hand_empty ?r))
+    )
+    :effect (and
+        (at start (not (hand_empty ?r)))
+        (at start (not (box_in_pickup_zone ?b ?l)))
+        (at end (holding ?r ?b))
+    )
+)
+
+(:durative-action place_ground
+    :parameters (?r - robot ?b - box ?l - location ?x - x_coord ?y - y_coord ?z - z_coord)
+    :duration ( = ?duration 5)
+    :condition (and
+        (at start (holding ?r ?b))
+        (over all (robot_at ?r ?l))
+        (over all (location_matches_xy ?l ?x ?y))
+        (over all (is_ground_level ?z))
+        (at start (xyz_free ?x ?y ?z))
+    )
+    :effect (and
+        (at start (not (holding ?r ?b)))
+        (at start (not (xyz_free ?x ?y ?z)))
+        (at end (xyz_occupied ?x ?y ?z))
+        (at end (hand_empty ?r))
+        (at end (box_at_xyz ?b ?x ?y ?z))
+    )
+)
+
+(:durative-action place_stacked
+    :parameters (?r - robot ?b - box ?b_below - box ?l - location ?x - x_coord ?y - y_coord ?z_top - z_coord ?z_below - z_coord)
+    :duration ( = ?duration 5)
+    :condition (and
+        (at start (holding ?r ?b))
+        (over all (robot_at ?r ?l))
+        (over all (location_matches_xy ?l ?x ?y))
+        (over all (z_above ?z_top ?z_below))
+        (at start (xyz_free ?x ?y ?z_top))
+        (over all (box_at_xyz ?b_below ?x ?y ?z_below))
+    )
+    :effect (and
+        (at start (not (holding ?r ?b)))
+        (at start (not (xyz_free ?x ?y ?z_top)))
+        (at end (xyz_occupied ?x ?y ?z_top))
+        (at end (hand_empty ?r))
+        (at end (box_at_xyz ?b ?x ?y ?z_top))
+    )
+)
+
+)
+
+
+=== GENERATION RULES ===
+
+RULE 1 — OBJECTS (CRITICAL FIX):
+Only instantiate the boxes explicitly mentioned in the user request.
+Do NOT add boxes that are not referenced. If the user says "pick box 28", only box28
+appears in the :objects section and in the :init box_in_pickup_zone facts.
+Always instantiate exactly 1 robot: r1.
+
+RULE 2 — COORDINATE NAMING (CRITICAL FIX):
+PDDL coordinate tokens are symbolic names, not numbers. You must encode the actual
+float values into the token name so they can be decoded downstream.
+
+Use the following naming convention:
+  - Positive floats:   x_0p5  means x = 0.5
+                       x_1p0  means x = 1.0
+                       y_0p0  means y = 0.0
+  - Negative floats:   x_neg1p0  means x = -1.0
+                       y_neg0p5  means y = -0.5
+  - For z-heights, always use these fixed tokens regardless of user input:
+       z0   = ground level   (real-world: 0.22 m)
+       z20  = one box high   (real-world: 0.42 m)
+       z40  = two boxes high (real-world: 0.62 m)
+       z60  = three boxes high (real-world: 0.82 m)
+       Formula: real_z = 0.22 + (level_index * 0.20)
+
+For each unique (x, y) placement target, create:
+  - A location token:  loc_Xval_Yval   (e.g. loc_0p5_0p5, loc_neg1p0_0p0)
+  - An x_coord token:  x_Xval          (e.g. x_0p5, x_neg1p0)
+  - A y_coord token:   y_Yval          (e.g. y_0p5, y_0p0)
+  - In :init: (location_matches_xy loc_Xval_Yval x_Xval y_Yval)
+
+If the user specifies a target z in meters (e.g. 0.2 or 0.42), map it to the closest
+z token using the formula above. 0.22 -> z0, 0.42 -> z20, 0.62 -> z40.
+
+RULE 3 — LOCATIONS:
+Always define:
+  - loc_start   : robot starting location
+  - loc_pickup  : where all boxes begin (pickup zone)
+  - One loc_Xval_Yval per unique placement target derived from the user request
+
+All locations must be connected to every other location in both directions via
+(connected locA locB) and (connected locB locA) in :init.
+
+RULE 4 — PHYSICS CONSTRAINTS:
+  - Declare ground level: (is_ground_level z0)
+  - Declare stacking order for every z level generated:
+      (z_above z20 z0)
+      (z_above z40 z20)
+      (z_above z60 z40)
+    Only include the z_above facts needed for the stack heights in this problem.
+  - Mark every (x, y, z) slot that a box may be placed into as (xyz_free x y z)
+    at the start. Include all z levels up to the maximum stack height required.
+
+RULE 5 — INITIAL STATE:
+  - Robot starts at loc_start with (hand_empty r1)
+  - Only the boxes mentioned in the request start in the pickup zone:
+      (box_in_pickup_zone boxNN loc_pickup)
+
+RULE 6 — GOAL:
+  - Use (box_at_xyz boxNN x_Xval y_Yval z_level) for each box's final position.
+  - Derive the z level token from the user's requested height using the formula
+    in Rule 2. If stacking is implied (e.g. "place box A on top of box B"),
+    the box on top gets z20, the base box gets z0.
+
+RULE 7 — OUTPUT FORMAT (CRITICAL):
+  - Output ONLY raw PDDL. No markdown, no code fences, no explanations.
+  - The response MUST begin with (define and end with )
+  - Use correct PDDL type spacing: objectname - typename
+  - No inline comments (some planners reject them)
+
+
+=== STEP-BY-STEP REASONING PROCESS ===
+
+Before writing any PDDL, reason through these steps in order:
+
+Step 1 — Parse the request:
+  - Which boxes are mentioned? (ONLY these go in :objects and :init)
+  - What are the target (x, y) positions? (one location token per unique xy pair)
+  - What is the target z for each box? (convert to z token using Rule 2 formula)
+  - Is any stacking implied? (box A on box B means B gets z0, A gets z20)
+
+Step 2 — Build the objects list:
+  r1 - robot
+  boxNN [only mentioned boxes] - box
+  loc_start loc_pickup loc_Xval_Yval [per target] - location
+  x_Xval [per unique x] - x_coord
+  y_Yval [per unique y] - y_coord
+  z0 [z20 z40 ...up to required height] - z_coord
+
+Step 3 — Build :init:
+  (hand_empty r1)
+  (robot_at r1 loc_start)
+  (box_in_pickup_zone boxNN loc_pickup) [only mentioned boxes]
+  (connected ...) [all pairs, both directions]
+  (location_matches_xy loc_Xval_Yval x_Xval y_Yval) [per target]
+  (is_ground_level z0)
+  (z_above z20 z0) [and higher levels if needed]
+  (xyz_free x_Xval y_Yval z0) [and z20, z40 if stacking required]
+
+Step 4 — Build :goal:
+  (box_at_xyz boxNN x_Xval y_Yval z_level) [for each box]
+
+
+=== WORKED EXAMPLE ===
+
+User request: "Pick up box 28 and place it at (0.5, 0.5, 0.22)."
+
+Reasoning:
+  - Box mentioned: box28 only
+  - Target xy: (0.5, 0.5) -> loc_0p5_0p5, x_0p5, y_0p5
+  - Target z: 0.22 m -> z0 (ground level, formula: 0.22 + 0*0.20 = 0.22)
+  - No stacking implied, single box on ground
+
+Correct output:
+
+(define (problem place_box28)
+  (:domain single_robot_construction_xyz)
+
+  (:objects
+    r1 - robot
+    box28 - box
+    loc_start loc_pickup loc_0p5_0p5 - location
+    x_0p5 - x_coord
+    y_0p5 - y_coord
+    z0 - z_coord
+  )
+
+  (:init
+    (hand_empty r1)
+    (robot_at r1 loc_start)
+    (box_in_pickup_zone box28 loc_pickup)
+    (connected loc_start loc_pickup)
+    (connected loc_pickup loc_start)
+    (connected loc_start loc_0p5_0p5)
+    (connected loc_0p5_0p5 loc_start)
+    (connected loc_pickup loc_0p5_0p5)
+    (connected loc_0p5_0p5 loc_pickup)
+    (location_matches_xy loc_0p5_0p5 x_0p5 y_0p5)
+    (is_ground_level z0)
+    (xyz_free x_0p5 y_0p5 z0)
+  )
+
+  (:goal
+    (and
+      (box_at_xyz box28 x_0p5 y_0p5 z0)
+    )
+  )
+)
+
+
+=== STACKING EXAMPLE ===
+
+User request: "Stack box 28 and box 30 at (1.0, 0.0). Place box 28 on the bottom."
+
+Reasoning:
+  - Boxes mentioned: box28, box30
+  - Target xy: (1.0, 0.0) -> loc_1p0_0p0, x_1p0, y_0p0
+  - box28 is base: z0. box30 is on top: z20
+  - xyz_free needed for both z0 and z20 at this location
+
+Correct output:
+
+(define (problem stack_boxes_1p0_0p0)
+  (:domain single_robot_construction_xyz)
+
+  (:objects
+    r1 - robot
+    box28 box30 - box
+    loc_start loc_pickup loc_1p0_0p0 - location
+    x_1p0 - x_coord
+    y_0p0 - y_coord
+    z0 z20 - z_coord
+  )
+
+  (:init
+    (hand_empty r1)
+    (robot_at r1 loc_start)
+    (box_in_pickup_zone box28 loc_pickup)
+    (box_in_pickup_zone box30 loc_pickup)
+    (connected loc_start loc_pickup)
+    (connected loc_pickup loc_start)
+    (connected loc_start loc_1p0_0p0)
+    (connected loc_1p0_0p0 loc_start)
+    (connected loc_pickup loc_1p0_0p0)
+    (connected loc_1p0_0p0 loc_pickup)
+    (location_matches_xy loc_1p0_0p0 x_1p0 y_0p0)
+    (is_ground_level z0)
+    (z_above z20 z0)
+    (xyz_free x_1p0 y_0p0 z0)
+    (xyz_free x_1p0 y_0p0 z20)
+  )
+
+  (:goal
+    (and
+      (box_at_xyz box28 x_1p0 y_0p0 z0)
+      (box_at_xyz box30 x_1p0 y_0p0 z20)
+    )
+  )
+)
