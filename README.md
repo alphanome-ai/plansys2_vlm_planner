@@ -85,10 +85,7 @@ Common required keys:
 - `OPENAI_API_KEY` (for `openai`)
 - `GEMINI_API_KEY` (for `google`)
 
-Important:
 
-- Do not commit real API keys.
-- Keep `.env` local or use secret management in deployment.
 
 ## Dependencies
 
